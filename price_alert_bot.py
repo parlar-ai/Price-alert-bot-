@@ -1,14 +1,17 @@
 """
-Free stock price range alert -> Discord notifier.
+Free multi-stock price-target alert -> Discord notifier.
 
 How it works:
-- Reads STOCK_SYMBOL, LOW_PRICE, HIGH_PRICE, DISCORD_WEBHOOK_URL from
-  environment variables (set as GitHub Actions secrets/variables).
-- Fetches the latest price using yfinance (free, no API key needed).
-- If the price is inside [LOW_PRICE, HIGH_PRICE], sends a message to the
-  Discord webhook -- but only once per "entry" into the range, using
-  state.json to remember whether it already alerted, so it doesn't spam
-  you every few minutes while the price stays inside the range.
+- Reads the list of stocks + target prices from stocks.json (edit that
+  file to add/remove stocks -- no code changes needed).
+- Reads DISCORD_WEBHOOK_URL from an environment variable (GitHub secret).
+- For each stock, fetches the latest price using yfinance (free).
+- If the price has crossed (gone at or above) the target price, sends a
+  Discord message -- but only once per "crossing", using state.json to
+  remember which symbols already alerted, so it won't spam you every
+  5 minutes while the price stays above the target.
+- If the price later drops back below the target, the alert resets, so
+  you'll get notified again if it crosses up a second time.
 """
 
 import json
@@ -19,7 +22,13 @@ from pathlib import Path
 import requests
 import yfinance as yf
 
-STATE_FILE = Path(__file__).parent / "state.json"
+BASE_DIR = Path(__file__).parent
+STOCKS_FILE = BASE_DIR / "stocks.json"
+STATE_FILE = BASE_DIR / "state.json"
+
+
+def load_stocks() -> list[dict]:
+    return json.loads(STOCKS_FILE.read_text())
 
 
 def load_state() -> dict:
@@ -34,10 +43,8 @@ def save_state(state: dict) -> None:
 
 def get_latest_price(symbol: str) -> float:
     ticker = yf.Ticker(symbol)
-    # fast_info is quick and works for most NSE/BSE/US symbols
     price = ticker.fast_info.get("last_price")
     if price is None:
-        # fallback: last close from recent history
         hist = ticker.history(period="1d")
         if hist.empty:
             raise RuntimeError(f"Could not fetch price for {symbol}")
@@ -51,30 +58,36 @@ def send_discord_message(webhook_url: str, content: str) -> None:
 
 
 def main() -> None:
-    symbol = os.environ["STOCK_SYMBOL"]
-    low = float(os.environ["LOW_PRICE"])
-    high = float(os.environ["HIGH_PRICE"])
     webhook_url = os.environ["DISCORD_WEBHOOK_URL"]
-
-    price = get_latest_price(symbol)
-    print(f"{symbol}: current price = {price}")
-
+    stocks = load_stocks()
     state = load_state()
-    was_in_range = state.get(symbol, False)
-    is_in_range = low <= price <= high
 
-    if is_in_range and not was_in_range:
-        message = (
-            f"🔔 **{symbol}** touched your price range!\n"
-            f"Current price: **{price}**\n"
-            f"Watched range: {low} - {high}"
-        )
-        send_discord_message(webhook_url, message)
-        print("Alert sent to Discord.")
-    else:
-        print("No new alert needed (either out of range, or already alerted).")
+    for stock in stocks:
+        symbol = stock["symbol"]
+        target = float(stock["target"])
 
-    state[symbol] = is_in_range
+        try:
+            price = get_latest_price(symbol)
+        except Exception as exc:  # noqa: BLE001
+            print(f"{symbol}: could not fetch price ({exc}), skipping")
+            continue
+
+        print(f"{symbol}: current price = {price}, target = {target}")
+
+        was_above = state.get(symbol, False)
+        is_above = price >= target
+
+        if is_above and not was_above:
+            message = (
+                f"🔔 **{symbol}** crossed your target price!\n"
+                f"Current price: **{price}**\n"
+                f"Target: {target}"
+            )
+            send_discord_message(webhook_url, message)
+            print(f"Alert sent for {symbol}.")
+
+        state[symbol] = is_above
+
     save_state(state)
 
 
