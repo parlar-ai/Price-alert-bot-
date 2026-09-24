@@ -1,0 +1,41 @@
+name: Price Alert Bot
+
+on:
+  schedule:
+    # Runs every 5 minutes. GitHub may delay slightly under load; that's fine.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # lets you click "Run workflow" manually to test
+
+permissions:
+  contents: write   # needed so the workflow can commit state.json back
+
+jobs:
+  check-price:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run price check
+        env:
+          STOCK_SYMBOL: ${{ vars.STOCK_SYMBOL }}
+          LOW_PRICE: ${{ vars.LOW_PRICE }}
+          HIGH_PRICE: ${{ vars.HIGH_PRICE }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python price_alert_bot.py
+
+      - name: Save alert state back to repo
+        run: |
+          git config user.name "price-alert-bot"
+          git config user.email "actions@github.com"
+          git add state.json
+          git diff --quiet --cached || git commit -m "Update alert state"
+          git push
